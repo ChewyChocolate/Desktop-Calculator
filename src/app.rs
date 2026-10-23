@@ -558,7 +558,7 @@ mod tests {
                         egui::epaint::Shape::Rect(key)
                             if key.rect.contains(equals.center())
                                 && key.rect.height() >= 38.0
-                                && key.rect.height() <= 80.0 =>
+                                && key.rect.height() <= 120.0 =>
                         {
                             Some((key.rect, shape.clip_rect))
                         }
@@ -572,18 +572,26 @@ mod tests {
             }
         }
     }
-    fn editor_frame(
+    fn sized_frame(
         a: &mut CalculatorApp,
         ctx: &egui::Context,
+        size: [f32; 2],
         events: Vec<egui::Event>,
     ) -> egui::FullOutput {
         ctx.run(
             egui::RawInput {
-                time: Some(ctx.input(|i| i.time) + 1.1),
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(400.0, 660.0),
-                )),
+                time: Some(
+                    ctx.input(|i| i.time)
+                        + if events
+                            .iter()
+                            .any(|e| matches!(e, egui::Event::PointerButton { .. }))
+                        {
+                            1.0 / 60.0
+                        } else {
+                            1.1
+                        },
+                ),
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size.into())),
                 events,
                 ..Default::default()
             },
@@ -597,6 +605,297 @@ mod tests {
             },
         )
     }
+    fn editor_frame(
+        a: &mut CalculatorApp,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        sized_frame(a, ctx, [400.0, 660.0], events)
+    }
+    fn text_bounds(output: &egui::FullOutput, label: &str) -> egui::Rect {
+        output
+            .shapes
+            .iter()
+            .rev()
+            .find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == label => {
+                    Some(text.visual_bounding_rect())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("Missing {label}"))
+    }
+    fn click(a: &mut CalculatorApp, ctx: &egui::Context, pos: egui::Pos2) -> egui::FullOutput {
+        editor_frame(
+            a,
+            ctx,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        editor_frame(
+            a,
+            ctx,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        )
+    }
+
+    #[test]
+    fn conventional_keypad_geometry_and_vertical_growth() {
+        for scientific in [false, true] {
+            for history in [false, true] {
+                for size in [
+                    [400.0, 660.0],
+                    [480.0, 680.0],
+                    [720.0, 740.0],
+                    [1200.0, 900.0],
+                ] {
+                    let mut a = app();
+                    a.settings.scientific = scientific;
+                    // Floating history deliberately overlays content; test its geometry separately.
+                    a.settings.history_open = history && size[0] >= crate::ui::HISTORY_BREAKPOINT;
+                    let ctx = egui::Context::default();
+                    crate::ui::install_fonts(&ctx);
+                    sized_frame(&mut a, &ctx, size, vec![]);
+                    let output = sized_frame(&mut a, &ctx, size, vec![]);
+                    let rows = [
+                        ["%", "CE", "C", ""],
+                        ["1/x", "x²", "√x", "÷"],
+                        ["7", "8", "9", "×"],
+                        ["4", "5", "6", "−"],
+                        ["1", "2", "3", "+"],
+                        ["±", "0", ".", "="],
+                    ];
+                    let mut keys: Vec<egui::Rect> = vec![];
+                    for row in rows {
+                        let mut baseline: Option<f32> = None;
+                        for (column, label) in row.into_iter().enumerate() {
+                            if label.is_empty() {
+                                continue;
+                            }
+                            let text = text_bounds(&output, label);
+                            let (rect, clip) = output
+                                .shapes
+                                .iter()
+                                .find_map(|s| match &s.shape {
+                                    egui::epaint::Shape::Rect(r)
+                                        if r.rect.contains(text.center())
+                                            && (38.0..121.0).contains(&r.rect.height()) =>
+                                    {
+                                        Some((r.rect, s.clip_rect))
+                                    }
+                                    _ => None,
+                                })
+                                .expect("key surface");
+                            assert!(clip.contains_rect(rect), "{label} at {size:?}");
+                            assert!(
+                                !keys.iter().any(|k| k.intersects(rect)),
+                                "overlapping {label}"
+                            );
+                            if let Some(y) = baseline {
+                                assert!((rect.top() - y).abs() < 1.0);
+                            }
+                            baseline = Some(rect.top());
+                            let reference = text_bounds(&output, rows[5][column]);
+                            assert!(
+                                (rect.center().x - reference.center().x).abs() < 3.0,
+                                "{label} col {column} at {size:?}: {rect:?} reference {reference:?}"
+                            );
+                            keys.push(rect);
+                        }
+                    }
+                    let bottom = keys.last().unwrap().bottom();
+                    assert!(
+                        (size[1] - bottom - 16.0).abs() < 10.0,
+                        "unused space at {size:?}: {bottom}"
+                    );
+                    if !scientific && size[1] == 900.0 {
+                        assert!(
+                            keys.last().unwrap().height() > 90.0,
+                            "Standard keys grow with window"
+                        );
+                    }
+                    if scientific {
+                        assert!(
+                            text_bounds(&output, "tan").bottom()
+                                < text_bounds(&output, "sin⁻¹").top()
+                        );
+                        assert!(
+                            text_bounds(&output, "ln").center().x
+                                > text_bounds(&output, "tan").center().x
+                        );
+                        assert!(
+                            text_bounds(&output, "n!").bottom() < text_bounds(&output, "%").top()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reordered_keypad_mouse_and_desktop_keyboard_input() {
+        for scientific in [false, true] {
+            let mut a = app();
+            a.settings.scientific = scientific;
+            let ctx = egui::Context::default();
+            crate::ui::install_fonts(&ctx);
+            editor_frame(&mut a, &ctx, vec![]);
+            for label in ["8", "÷", "2", "="] {
+                let output = editor_frame(&mut a, &ctx, vec![]);
+                click(&mut a, &ctx, text_bounds(&output, label).center());
+            }
+            assert_eq!(a.result, "4");
+            assert_eq!(a.history.entries.len(), 1);
+            editor_frame(
+                &mut a,
+                &ctx,
+                vec![
+                    egui::Event::Text("12*3".into()),
+                    key(egui::Key::Enter, egui::Modifiers::NONE),
+                ],
+            );
+            assert_eq!(a.result, "36");
+            editor_frame(
+                &mut a,
+                &ctx,
+                vec![key(egui::Key::Backspace, egui::Modifiers::NONE)],
+            );
+            assert_eq!(a.expression, "3");
+            editor_frame(
+                &mut a,
+                &ctx,
+                vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
+            );
+            assert!(a.expression.is_empty());
+            editor_frame(
+                &mut a,
+                &ctx,
+                vec![
+                    egui::Event::Text("9+1-2/4".into()),
+                    key(egui::Key::Enter, egui::Modifiers::NONE),
+                ],
+            );
+            assert_eq!(a.result, "9.5");
+        }
+    }
+
+    #[test]
+    fn single_entry_is_not_duplicated_and_stays_editable() {
+        let mut a = app();
+        let ctx = egui::Context::default();
+        crate::ui::install_fonts(&ctx);
+        a.edit_expression("1234".into());
+        editor_frame(&mut a, &ctx, vec![]);
+        let output = editor_frame(&mut a, &ctx, vec![]);
+        text_bounds(&output, "1,234");
+        let pos = text_bounds(&output, "Current entry").center();
+        assert!(!output.shapes.iter().any(
+            |s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.text() == "1234")
+        ));
+        click(&mut a, &ctx, pos);
+        assert!(ctx.memory(|m| m.has_focus(egui::Id::new("expression_editor"))));
+        editor_frame(&mut a, &ctx, vec![]);
+        editor_frame(
+            &mut a,
+            &ctx,
+            vec![
+                key(egui::Key::Home, egui::Modifiers::NONE),
+                egui::Event::Text("2".into()),
+            ],
+        );
+        assert_eq!(a.expression, "21234");
+        editor_frame(
+            &mut a,
+            &ctx,
+            vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert_eq!(a.result, "21234");
+        // Native Copy remains the ungrouped value, ready for reuse in calculations.
+        ctx.memory_mut(|m| m.surrender_focus(egui::Id::new("expression_editor")));
+        let output = editor_frame(&mut a, &ctx, vec![egui::Event::Copy]);
+        assert!(
+            output
+                .platform_output
+                .commands
+                .iter()
+                .any(|c| matches!(c, egui::OutputCommand::CopyText(t) if t == "21234"))
+        );
+        assert_eq!(a.history.entries[0].result, "21234");
+    }
+
+    #[test]
+    fn angle_buttons_recalculate_and_accept_keyboard_focus() {
+        let mut a = app();
+        a.settings.scientific = true;
+        a.edit_expression("sin(30)".into());
+        a.evaluate();
+        let ctx = egui::Context::default();
+        crate::ui::install_fonts(&ctx);
+        editor_frame(&mut a, &ctx, vec![]);
+        let output = editor_frame(&mut a, &ctx, vec![]);
+        click(&mut a, &ctx, text_bounds(&output, "RAD").center());
+        assert_eq!(a.settings.angle, Angle::Radians);
+        assert_eq!(
+            a.result,
+            calculator::evaluate("sin(30)", Angle::Radians)
+                .unwrap()
+                .value
+                .text()
+        );
+        assert_eq!(a.history.entries.len(), 1);
+        assert!(!a.evaluated);
+        // Mouse activation need not retain focus. Reach DEG using the same
+        // Tab sequence as a keyboard user, then verify reverse navigation.
+        let output = editor_frame(&mut a, &ctx, vec![]);
+        let degrees = text_bounds(&output, "DEG").center();
+        let mut reached = false;
+        for _ in 0..50 {
+            editor_frame(
+                &mut a,
+                &ctx,
+                vec![key(egui::Key::Tab, egui::Modifiers::NONE)],
+            );
+            reached = ctx
+                .memory(|m| m.focused())
+                .and_then(|id| ctx.read_response(id))
+                .is_some_and(|r| r.rect.contains(degrees));
+            if reached {
+                break;
+            }
+        }
+        assert!(reached, "DEG must be reachable by Tab");
+        editor_frame(
+            &mut a,
+            &ctx,
+            vec![key(egui::Key::Tab, egui::Modifiers::NONE)],
+        );
+        editor_frame(
+            &mut a,
+            &ctx,
+            vec![key(egui::Key::Tab, egui::Modifiers::SHIFT)],
+        );
+        editor_frame(
+            &mut a,
+            &ctx,
+            vec![key(egui::Key::Space, egui::Modifiers::NONE)],
+        );
+        editor_frame(&mut a, &ctx, vec![]);
+        assert_eq!(a.settings.angle, Angle::Degrees);
+        assert_eq!(a.result, "0.5");
+    }
+
     fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
         egui::Event::Key {
             key,
@@ -729,6 +1028,61 @@ mod tests {
             assert_eq!(a.expression, "12+3");
             assert_eq!(a.result, "15");
         }
+    }
+
+    #[test]
+    fn display_distinguishes_preview_result_and_error_without_save_hint() {
+        let mut a = app();
+        let ctx = egui::Context::default();
+        crate::ui::install_fonts(&ctx);
+        let body = |output: &egui::FullOutput, needle: &str| {
+            output.shapes.iter().any(|shape| {
+                matches!(
+                    &shape.shape,
+                    egui::epaint::Shape::Text(text) if text.galley.text() == needle
+                )
+            })
+        };
+        a.edit_expression("2+3".into());
+        let output = editor_frame(&mut a, &ctx, vec![]);
+        assert!(body(&output, "Preview · Enter evaluates"));
+        a.evaluate();
+        let output = editor_frame(&mut a, &ctx, vec![]);
+        assert!(body(&output, "= Result"));
+        a.edit_expression("1/0".into());
+        let output = editor_frame(&mut a, &ctx, vec![]);
+        assert!(body(&output, "Cannot divide by zero"));
+        for needle in ["Enter to save", "Enter to save "] {
+            assert!(
+                !output
+                    .shapes
+                    .iter()
+                    .any(|s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.text().contains(needle))),
+                "ambiguous save hint must not appear: {needle}"
+            );
+        }
+    }
+
+    #[test]
+    fn inverse_trig_button_uses_mathematical_notation_and_still_inserts_asin() {
+        let mut a = app();
+        a.settings.scientific = true;
+        let ctx = egui::Context::default();
+        crate::ui::install_fonts(&ctx);
+        editor_frame(&mut a, &ctx, vec![]);
+        let output = editor_frame(&mut a, &ctx, vec![]);
+        click(&mut a, &ctx, text_bounds(&output, "sin⁻¹").center());
+        assert_eq!(a.expression, "asin(");
+        editor_frame(
+            &mut a,
+            &ctx,
+            vec![
+                egui::Event::Text("0.5)".into()),
+                key(egui::Key::Enter, egui::Modifiers::NONE),
+            ],
+        );
+        assert_eq!(a.result, "30");
+        assert_eq!(a.history.entries[0].expression, "asin(0.5)");
     }
 
     #[test]
@@ -1105,7 +1459,7 @@ mod tests {
                 .iter()
                 .find_map(|shape| match &shape.shape {
                     egui::epaint::Shape::Text(text)
-                        if text.galley.text() == "1234567890123456789012345678" =>
+                        if text.galley.text() == "1,234,567,890,123,456,789,012,345,678" =>
                     {
                         Some(text)
                     }
@@ -1132,10 +1486,18 @@ mod tests {
                     let ctx = egui::Context::default();
                     crate::ui::install_fonts(&ctx);
                     editor_frame(&mut a, &ctx, vec![]);
-                    let output = editor_frame(&mut a, &ctx, vec![]);
+                    editor_frame(&mut a, &ctx, vec![]);
+                    let output = editor_frame(
+                        &mut a,
+                        &ctx,
+                        vec![egui::Event::PointerMoved(egui::pos2(380.0, 400.0))],
+                    );
+                    assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+                        egui::epaint::Shape::Rect(r) if r.rect.width() <= 12.0 && r.rect.height() > 150.0 && r.rect.left() > 368.0
+                    )), "Unnecessary keypad scrollbar for {expression}, scientific={scientific}");
                     let labels: &[&str] = if scientific {
                         &[
-                            "=", "sin", "cos", "tan", "asin", "acos", "atan", "xʸ", "ʸ√x", "π",
+                            "=", "sin", "cos", "tan", "sin⁻¹", "cos⁻¹", "tan⁻¹", "xʸ", "ʸ√x", "π",
                             "n!", "DEG", "RAD",
                         ]
                     } else {

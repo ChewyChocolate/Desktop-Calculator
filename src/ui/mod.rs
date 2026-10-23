@@ -19,7 +19,7 @@ struct Palette {
 const GAP: f32 = 8.0;
 const CONTENT_WIDTH: f32 = 480.0;
 const RADIUS: u8 = 6;
-const TOOL_SIZE: f32 = 32.0;
+const TOOL_SIZE: f32 = 36.0;
 pub(crate) const HISTORY_BREAKPOINT: f32 = 720.0;
 
 fn palette(ctx: &egui::Context) -> Palette {
@@ -31,7 +31,7 @@ fn palette(ctx: &egui::Context) -> Palette {
             special: hex(0x364139),
             science: hex(0x293831),
             ink: hex(0xeaf0e9),
-            muted: hex(0xa4b1a7),
+            muted: hex(0xc3d0c7),
             line: hex(0x38433c),
             accent: hex(0x9bd1ae),
             accent_soft: hex(0x304e3d),
@@ -45,7 +45,7 @@ fn palette(ctx: &egui::Context) -> Palette {
             special: hex(0xe6eae1),
             science: hex(0xe5ede5),
             ink: hex(0x243c30),
-            muted: hex(0x647468),
+            muted: hex(0x46554a),
             line: hex(0xd6ddd1),
             accent: hex(0x245d42),
             accent_soft: hex(0xdce8db),
@@ -123,7 +123,18 @@ fn icon_button(ui: &mut egui::Ui, label: &str, tip: &str, selected: bool) -> egu
 // All toolbar and editing icons share an 18-point canvas and 1.5-point stroke.
 fn paint_icon(ui: &egui::Ui, response: &egui::Response, icon: &str) {
     let c = response.rect.center();
-    let stroke = Stroke::new(1.5_f32, ui.style().interact(response).fg_stroke.color);
+    let p = palette(ui.ctx());
+    let copy_at_rest = icon == "⧉" && !response.hovered() && !response.has_focus();
+    let stroke = Stroke::new(
+        1.5_f32,
+        if !response.enabled() {
+            p.muted.gamma_multiply(0.5)
+        } else if copy_at_rest {
+            p.muted
+        } else {
+            p.ink
+        },
+    );
     let painter = ui
         .painter()
         .with_clip_rect(response.rect.intersect(ui.clip_rect()));
@@ -194,6 +205,72 @@ fn focus_ring(ui: &egui::Ui, response: &egui::Response, p: Palette) {
         );
     }
 }
+fn choice_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    selected: bool,
+    size: Vec2,
+    p: Palette,
+) -> egui::Response {
+    let response = ui
+        .scope(|ui| {
+            let widgets = &mut ui.style_mut().visuals.widgets;
+            widgets.inactive.weak_bg_fill = if selected { p.accent_soft } else { p.panel };
+            widgets.hovered.weak_bg_fill = p.special;
+            widgets.active.weak_bg_fill = p.accent_soft;
+            ui.add_sized(
+                size,
+                egui::Button::new(RichText::new(label).size(14.0).color(if selected {
+                    p.accent
+                } else {
+                    p.muted
+                })),
+            )
+        })
+        .inner;
+    if selected {
+        let r = response.rect.shrink2(Vec2::new(10.0, 3.0));
+        ui.painter().line_segment(
+            [r.left_bottom(), r.right_bottom()],
+            Stroke::new(2.0_f32, p.accent),
+        );
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            ui.is_enabled(),
+            selected,
+            label,
+        )
+    });
+    focus_ring(ui, &response, p);
+    response
+}
+
+// Group only the integer mantissa; display formatting never reaches evaluation or Copy.
+fn group_number(raw: &str) -> String {
+    let (mantissa, exponent) = raw.find(['e', 'E']).map_or((raw, ""), |i| raw.split_at(i));
+    let (integer, fraction) = mantissa
+        .find('.')
+        .map_or((mantissa, ""), |i| mantissa.split_at(i));
+    let (sign, digits) = integer
+        .strip_prefix('-')
+        .map_or(("", integer), |v| ("-", v));
+    if digits.len() <= 3 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return raw.into();
+    }
+    let mut grouped = String::from(sign);
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped.push_str(fraction);
+    grouped.push_str(exponent);
+    grouped
+}
+
 pub fn show(app: &mut CalculatorApp, ctx: &egui::Context) {
     let p = palette(ctx);
     // The rail only docks when at least 440 points remain for the calculator.
@@ -204,13 +281,21 @@ pub fn show(app: &mut CalculatorApp, ctx: &egui::Context) {
             .width_range(208.0..=(ctx.content_rect().width() - 440.0).min(320.0))
             .resizable(true)
             .frame(egui::Frame::new().fill(p.panel).inner_margin(16))
-            .show(ctx, |ui| history(app, ui, p));
+            .show(ctx, |ui| history(app, ui, p, true));
     }
     egui::CentralPanel::default()
         .frame(egui::Frame::new().fill(p.bg).inner_margin(16))
         .show(ctx, |ui| {
             let width = ui.available_width().min(CONTENT_WIDTH);
-            let height = ui.available_height().min(780.0);
+            let max_key_height = (width / 4.0).clamp(72.0, 112.0);
+            let overhead = if app.settings.scientific {
+                370.0
+            } else {
+                192.0
+            };
+            let height = ui
+                .available_height()
+                .min(overhead + 6.0 * (max_key_height + GAP));
             let rect =
                 egui::Rect::from_center_size(ui.max_rect().center(), Vec2::new(width, height));
             ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
@@ -226,7 +311,7 @@ pub fn show(app: &mut CalculatorApp, ctx: &egui::Context) {
             .max_height((ctx.content_rect().height() - 64.0).max(200.0))
             .default_height(400.0)
             .collapsible(false)
-            .show(ctx, |ui| history(app, ui, p));
+            .show(ctx, |ui| history(app, ui, p, false));
         if !open {
             app.settings.history_open = false;
         }
@@ -259,7 +344,7 @@ pub fn show(app: &mut CalculatorApp, ctx: &egui::Context) {
                                 &format!("{command}+C / {command}+V"),
                                 "Copy result / paste an expression",
                             ),
-                            ("Ctrl+H", "Toggle history"),
+                            ("Ctrl+H", "Show or hide history"),
                             ("Ctrl+1 / Ctrl+2", "Standard / Scientific mode"),
                             ("Tab / Shift+Tab", "Move focus between controls"),
                             ("Space", "Activate focused control"),
@@ -273,7 +358,6 @@ pub fn show(app: &mut CalculatorApp, ctx: &egui::Context) {
                 ui.add_space(12.0);
                 ui.label("Percent divides the preceding operand by 100.");
                 ui.label("Scientific results are approximate (IEEE-754).");
-                ui.label("Calculator 1.0");
             });
     }
 }
@@ -288,23 +372,7 @@ fn calculator_panel(app: &mut CalculatorApp, ui: &mut egui::Ui, ctx: &egui::Cont
                 ui.horizontal(|ui| {
                     for (label, scientific) in [("Standard", false), ("Scientific", true)] {
                         let active = app.settings.scientific == scientific;
-                        if ui
-                            .add_sized(
-                                [88.0, TOOL_SIZE],
-                                egui::Button::new(
-                                    RichText::new(label).size(14.0).color(if active {
-                                        p.accent
-                                    } else {
-                                        p.muted
-                                    }),
-                                )
-                                .selected(active)
-                                .fill(if active {
-                                    p.accent_soft
-                                } else {
-                                    p.panel
-                                }),
-                            )
+                        if choice_button(ui, label, active, Vec2::new(88.0, TOOL_SIZE), p)
                             .on_hover_text(if scientific {
                                 "Scientific mode · Ctrl+2"
                             } else {
@@ -319,14 +387,12 @@ fn calculator_panel(app: &mut CalculatorApp, ui: &mut egui::Ui, ctx: &egui::Cont
             });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = GAP;
-            if icon_button(
-                ui,
-                "◷",
-                "Toggle history · Ctrl+H",
-                app.settings.history_open,
-            )
-            .clicked()
-            {
+            let history_tip = if app.settings.history_open {
+                "Hide history · Ctrl+H"
+            } else {
+                "Show history · Ctrl+H"
+            };
+            if icon_button(ui, "◷", history_tip, app.settings.history_open).clicked() {
                 app.settings.history_open = !app.settings.history_open;
             }
             let menu = ui
@@ -338,9 +404,34 @@ fn calculator_panel(app: &mut CalculatorApp, ui: &mut egui::Ui, ctx: &egui::Cont
                     )
                     .ui(ui, |ui| {
                         ui.label(RichText::new("Appearance").size(13.0).color(p.muted));
-                        ui.selectable_value(&mut app.settings.theme, Theme::System, "System");
-                        ui.selectable_value(&mut app.settings.theme, Theme::Light, "Light");
-                        ui.selectable_value(&mut app.settings.theme, Theme::Dark, "Dark");
+                        for (theme, label) in [
+                            (Theme::System, "System"),
+                            (Theme::Light, "Light"),
+                            (Theme::Dark, "Dark"),
+                        ] {
+                            let selected = app.settings.theme == theme;
+                            let option = ui.selectable_value(&mut app.settings.theme, theme, label);
+                            option.widget_info(|| {
+                                egui::WidgetInfo::selected(
+                                    egui::WidgetType::SelectableLabel,
+                                    true,
+                                    selected,
+                                    label,
+                                )
+                            });
+                            // Every appearance option is selectable; mark the chosen
+                            // one with a drawn checkmark as well as the row highlight.
+                            if selected {
+                                let r = option.rect;
+                                ui.painter().text(
+                                    egui::pos2(r.right() - 6.0, r.center().y),
+                                    egui::Align2::RIGHT_CENTER,
+                                    "✓",
+                                    FontId::proportional(14.0),
+                                    p.accent,
+                                );
+                            }
+                        }
                         ui.separator();
                         if ui.button("Keyboard shortcuts    F1").clicked() {
                             app.help_open = true;
@@ -358,34 +449,32 @@ fn calculator_panel(app: &mut CalculatorApp, ui: &mut egui::Ui, ctx: &egui::Cont
                     "Appearance and keyboard shortcuts",
                 )
             });
+            focus_ring(ui, &menu, p);
             menu.on_hover_text("Appearance and keyboard shortcuts");
         });
     });
     ui.add_space(GAP);
     display(app, ui, ctx, p);
     ui.add_space(GAP);
-    let sci_height = if app.settings.scientific { 178.0 } else { 0.0 };
+    let sci_height = if app.settings.scientific { 176.0 } else { 0.0 };
     // Whole-point rows leave rounding room so a fractional overflow cannot summon a scrollbar.
     let key_height = ((ui.available_height() - sci_height - GAP * 5.0 - 1.0) / 6.0)
         .floor()
-        .clamp(38.0, 72.0);
+        .max(38.0);
     egui::ScrollArea::vertical()
         .id_salt("keypad_scroll")
         .show(ui, |ui| {
             if app.settings.scientific {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(RichText::new("Angle").size(13.0).color(p.muted));
                     let degrees = app.settings.angle == Angle::Degrees;
                     for (label, selected) in [("DEG", degrees), ("RAD", !degrees)] {
-                        if ui
-                            .add_sized(
-                                [48.0, 28.0],
-                                egui::Button::new(RichText::new(label).size(13.0))
-                                    .selected(selected),
-                            )
+                        if choice_button(ui, label, selected, Vec2::new(52.0, 32.0), p)
                             .on_hover_text(format!(
-                                "Angle unit: {}",
-                                if label == "DEG" { "degrees" } else { "radians" }
+                                "Use {} for trigonometric calculations{}",
+                                if label == "DEG" { "degrees" } else { "radians" },
+                                if selected { " (selected)" } else { "" }
                             ))
                             .clicked()
                             && !selected
@@ -399,34 +488,34 @@ fn calculator_panel(app: &mut CalculatorApp, ui: &mut egui::Ui, ctx: &egui::Cont
                         ("sin", "sin"),
                         ("cos", "cos"),
                         ("tan", "tan"),
-                        ("xʸ", "^"),
-                        ("ʸ√x", "root"),
-                    ],
-                    [
-                        ("asin", "asin"),
-                        ("acos", "acos"),
-                        ("atan", "atan"),
                         ("ln", "ln"),
                         ("log", "log"),
+                    ],
+                    [
+                        ("sin⁻¹", "asin"),
+                        ("cos⁻¹", "acos"),
+                        ("tan⁻¹", "atan"),
+                        ("xʸ", "^"),
+                        ("ʸ√x", "root"),
                     ],
                     [("π", "pi"), ("e", "e"), ("n!", "!"), ("(", "("), (")", ")")],
                 ];
                 for row in science {
                     key_row(app, ui, &row, 34.0, p, true);
                 }
-                ui.add_space(6.0);
+                ui.add_space(4.0);
             }
             let rows = [
-                [("CE", "ce"), ("C", "clear"), ("⌫", "back"), ("÷", "/")],
+                [("%", "%"), ("CE", "ce"), ("C", "clear"), ("⌫", "back")],
                 [
                     ("1/x", "reciprocal"),
                     ("x²", "square"),
                     ("√x", "sqrt"),
-                    ("×", "*"),
+                    ("÷", "/"),
                 ],
-                [("7", "7"), ("8", "8"), ("9", "9"), ("−", "-")],
-                [("4", "4"), ("5", "5"), ("6", "6"), ("+", "+")],
-                [("1", "1"), ("2", "2"), ("3", "3"), ("%", "%")],
+                [("7", "7"), ("8", "8"), ("9", "9"), ("×", "*")],
+                [("4", "4"), ("5", "5"), ("6", "6"), ("−", "-")],
+                [("1", "1"), ("2", "2"), ("3", "3"), ("+", "+")],
                 [("±", "sign"), ("0", "0"), (".", "."), ("=", "=")],
             ];
             for row in rows {
@@ -443,34 +532,65 @@ fn display(app: &mut CalculatorApp, ui: &mut egui::Ui, ctx: &egui::Context, p: P
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 2.0;
-            let mut expression = app.expression.clone();
-            let editor = ui.add_sized(
-                [(ui.available_width() - TOOL_SIZE - GAP).max(1.0), 24.0],
-                egui::TextEdit::singleline(&mut expression)
-                    .id(egui::Id::new("expression_editor"))
-                    .hint_text("Type a calculation…")
-                    .margin(Vec2::ZERO)
-                    .font(FontId::proportional(17.0))
-                    .text_color(p.muted)
-                    .frame(false)
-                    .horizontal_align(Align::RIGHT)
-                    .char_limit(2048)
-                    .desired_width(f32::INFINITY),
-            );
-            editor.clone().on_hover_text(
-                "Edit anywhere · standard selection, copy, paste and undo shortcuts",
-            );
-            if editor.clicked() {
-                app.begin_edit();
-            }
-            if editor.changed() {
-                app.edit_expression(expression);
+            let editor_id = egui::Id::new("expression_editor");
+            let entry_only = !app.expression.is_empty() && app.expression.parse::<f64>().is_ok();
+            let editing = ctx.memory(|m| m.has_focus(editor_id));
+            let editor_size = Vec2::new((ui.available_width() - TOOL_SIZE - GAP).max(1.0), 24.0);
+            if entry_only && !editing {
+                // A lone number is already visible at full size below. Keep the editor
+                // discoverable without echoing the same number in two places.
+                let (rect, response) = ui.allocate_exact_size(editor_size, egui::Sense::click());
+                ui.painter().text(
+                    rect.right_center(),
+                    egui::Align2::RIGHT_CENTER,
+                    "Edit value",
+                    FontId::proportional(17.0),
+                    p.muted,
+                );
+                focus_ring(ui, &response, p);
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Edit value")
+                });
+                if response
+                    .on_hover_cursor(egui::CursorIcon::Text)
+                    .on_hover_text("Click to edit this value")
+                    .clicked()
+                {
+                    app.begin_edit();
+                    ctx.memory_mut(|m| m.request_focus(editor_id));
+                    ctx.request_repaint();
+                }
+            } else {
+                let mut expression = app.expression.clone();
+                let editor = ui.add_sized(
+                    editor_size,
+                    egui::TextEdit::singleline(&mut expression)
+                        .id(editor_id)
+                        .hint_text("Expression")
+                        .margin(Vec2::ZERO)
+                        .font(FontId::proportional(17.0))
+                        .text_color(p.muted)
+                        .frame(false)
+                        .horizontal_align(Align::RIGHT)
+                        .char_limit(2048)
+                        .desired_width(f32::INFINITY),
+                );
+                editor.clone().on_hover_text(
+                    "Edit anywhere · standard selection, copy, paste and undo shortcuts",
+                );
+                if editor.clicked() {
+                    app.begin_edit();
+                }
+                if editor.changed() {
+                    app.edit_expression(expression);
+                }
             }
             ui.horizontal(|ui| {
+                let grouped = group_number(&app.result);
                 let result = if app.result_valid && app.approximate {
-                    format!("≈ {}", app.result)
+                    format!("≈ {grouped}")
                 } else {
-                    app.result.clone()
+                    grouped
                 };
                 let width = (ui.available_width() - TOOL_SIZE - GAP).max(1.0);
                 let size = ui.fonts_mut(|fonts| {
@@ -492,8 +612,10 @@ fn display(app: &mut CalculatorApp, ui: &mut egui::Ui, ctx: &egui::Context, p: P
                                 ui.add(
                                     egui::Label::new(
                                         RichText::new(&result).font(FontId::monospace(size)).color(
-                                            if app.result_valid || app.expression.is_empty() {
+                                            if app.evaluated || app.expression.is_empty() {
                                                 p.ink
+                                            } else if app.result_valid {
+                                                p.accent
                                             } else {
                                                 p.muted
                                             },
@@ -519,16 +641,12 @@ fn display(app: &mut CalculatorApp, ui: &mut egui::Ui, ctx: &egui::Context, p: P
                 (error.as_str(), p.error)
             } else if let Some((notice, _)) = &app.notice {
                 (notice.as_str(), p.accent)
-            } else if app.expression.is_empty() {
+            } else if app.expression.is_empty() || app.evaluated {
                 ("", p.muted)
             } else if !app.result_valid {
-                ("Incomplete expression · previous result", p.muted)
-            } else if app.approximate {
-                ("Approximate result", p.muted)
-            } else if app.evaluated {
-                ("Result", p.muted)
+                ("Incomplete expression", p.muted)
             } else {
-                ("Live preview", p.muted)
+                ("Preview", p.muted)
             };
             // Reserve one line so errors and copy feedback never move the keypad.
             let (rect, _) =
@@ -548,18 +666,22 @@ fn key_row<const N: usize>(
     p: Palette,
     science: bool,
 ) {
-    let width = (ui.available_width() - GAP * (N - 1) as f32) / N as f32;
+    let group_gap = if science { GAP } else { 0.0 };
+    let width = (ui.available_width() - GAP * (N - 1) as f32 - group_gap) / N as f32;
     ui.horizontal(|ui| {
         ui.spacing_mut().button_padding = Vec2::new(8.0, 4.0);
-        for &(label, action) in keys {
+        for (column, &(label, action)) in keys.iter().enumerate() {
+            if science && column == 3 {
+                ui.add_space(group_gap);
+            }
             let operator = matches!(action, "/" | "*" | "-" | "+" | "%" | "^");
             let special = !action.chars().all(|c| c.is_ascii_digit() || c == '.');
             let fill = if action == "=" {
                 p.accent
-            } else if operator {
-                p.accent_soft
             } else if science {
                 p.science
+            } else if operator {
+                p.accent_soft
             } else if special {
                 p.special
             } else {
@@ -625,28 +747,28 @@ fn key_row<const N: usize>(
                 );
             }
             let tip = match action {
-                "ce" => "Clear entry · Delete",
-                "clear" => "Clear all · Escape",
-                "back" => "Backspace",
-                "reciprocal" => "Reciprocal of last operand",
-                "square" => "Square last operand",
-                "sqrt" => "Square root of last operand",
-                "sign" => "Change sign of last operand",
-                "%" => "Percent: divide operand by 100",
+                "ce" => "Clear the current entry (last operand) · Delete",
+                "clear" => "Clear the whole calculation · Escape",
+                "back" => "Delete the last character · Backspace",
+                "reciprocal" => "Reciprocal of last operand (1/x)",
+                "square" => "Square of last operand (x²)",
+                "sqrt" => "Square root of last operand (√x)",
+                "sign" => "Change sign of last operand (±)",
+                "%" => "Percent: divide the preceding operand by 100",
                 "=" => "Calculate · Enter (again to repeat)",
                 "root" => "Nth root: x^(1/n). Enter the root degree, then close )",
-                "^" => "Raise to a power",
+                "^" => "Raise to a power (xʸ)",
                 "!" => "Factorial (whole numbers, 0–170)",
-                "pi" => "Pi · approximate",
-                "e" => "Euler's number · approximate",
+                "pi" => "Pi (π) · approximate",
+                "e" => "Euler's number (e) · approximate",
                 "sin" => "Sine of last operand · uses DEG/RAD",
                 "cos" => "Cosine of last operand · uses DEG/RAD",
                 "tan" => "Tangent of last operand · uses DEG/RAD",
-                "asin" => "Inverse sine · result uses DEG/RAD",
-                "acos" => "Inverse cosine · result uses DEG/RAD",
-                "atan" => "Inverse tangent · result uses DEG/RAD",
-                "ln" => "Natural logarithm",
-                "log" => "Base-10 logarithm",
+                "asin" => "Inverse sine (arcsine) · result uses DEG/RAD",
+                "acos" => "Inverse cosine (arccosine) · result uses DEG/RAD",
+                "atan" => "Inverse tangent (arctangent) · result uses DEG/RAD",
+                "ln" => "Natural logarithm (base e)",
+                "log" => "Common logarithm (base 10)",
                 _ => "",
             };
             response.widget_info(|| {
@@ -677,19 +799,35 @@ fn key_row<const N: usize>(
     });
 }
 fn display_expression(s: &str) -> String {
-    s.replace('*', " × ").replace('/', " ÷ ").replace("pi", "π")
+    s.replace("asin(", "sin⁻¹(")
+        .replace("acos(", "cos⁻¹(")
+        .replace("atan(", "tan⁻¹(")
+        .replace('*', " × ")
+        .replace('/', " ÷ ")
+        .replace("pi", "π")
 }
-fn history(app: &mut CalculatorApp, ui: &mut egui::Ui, p: Palette) {
+fn history(app: &mut CalculatorApp, ui: &mut egui::Ui, p: Palette, show_heading: bool) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new("History").size(17.0).strong());
+        if show_heading {
+            ui.label(RichText::new("History").size(17.0).strong());
+        }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if icon_button(ui, "×", "Close history", false).clicked() {
+            if icon_button(ui, "×", "Hide history", false).clicked() {
                 app.settings.history_open = false;
             }
             ui.add_enabled_ui(!app.history.entries.is_empty(), |ui| {
-                if ui
-                    .small_button("Clear")
-                    .on_hover_text("Clear saved calculations · Undo is available")
+                let clear = ui.add_sized([52.0, TOOL_SIZE], egui::Button::new("Clear"));
+                clear.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        ui.is_enabled(),
+                        "Clear history",
+                    )
+                });
+                if clear
+                    .on_hover_text(
+                        "Clear history · removes every saved calculation · the current calculation is kept · Undo is available",
+                    )
                     .clicked()
                 {
                     app.clear_history();
@@ -697,11 +835,6 @@ fn history(app: &mut CalculatorApp, ui: &mut egui::Ui, p: Palette) {
             });
         });
     });
-    ui.label(
-        RichText::new(format!("{} saved locally", app.history.entries.len()))
-            .size(13.0)
-            .color(p.muted),
-    );
     if app.cleared_history.is_some() {
         ui.horizontal(|ui| {
             ui.label(RichText::new("History cleared").size(13.0).color(p.muted));
@@ -713,13 +846,10 @@ fn history(app: &mut CalculatorApp, ui: &mut egui::Ui, p: Palette) {
     ui.add_space(GAP);
     if app.history.entries.is_empty() {
         ui.add_space(24.0);
-        ui.label(RichText::new("No calculations yet").size(16.0).color(p.ink));
         ui.label(
-            RichText::new(
-                "Press Enter or = to save a calculation. Select an entry to restore it here.",
-            )
-            .size(13.0)
-            .color(p.muted),
+            RichText::new("Your calculations will appear here.")
+                .size(13.0)
+                .color(p.muted),
         );
     }
     let mut recall = None;
@@ -727,13 +857,14 @@ fn history(app: &mut CalculatorApp, ui: &mut egui::Ui, p: Palette) {
         .id_salt("history_list")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.spacing_mut().item_spacing.y = GAP;
             for (i, entry) in app.history.entries.iter().enumerate().rev() {
                 ui.push_id(i, |ui| {
                     let (row, _) = ui.allocate_exact_size(
-                        Vec2::new(ui.available_width(), 52.0),
+                        Vec2::new(ui.available_width(), 60.0),
                         egui::Sense::hover(),
                     );
+                    ui.painter().rect_filled(row, RADIUS, p.key);
                     let select = egui::Rect::from_min_max(
                         row.min,
                         row.max - Vec2::new(TOOL_SIZE + GAP, 0.0),
@@ -744,7 +875,10 @@ fn history(app: &mut CalculatorApp, ui: &mut egui::Ui, p: Palette) {
                         egui::WidgetInfo::labeled(
                             egui::WidgetType::Button,
                             true,
-                            format!("Restore {} = {}", entry.expression, entry.result),
+                            format!(
+                                "Restore expression {} and result {}",
+                                entry.expression, entry.result
+                            ),
                         )
                     });
                     let selected = app.evaluated
@@ -770,18 +904,18 @@ fn history(app: &mut CalculatorApp, ui: &mut egui::Ui, p: Palette) {
                             display_expression(&entry.expression),
                             13.0,
                             p.muted,
-                            4.0,
+                            7.0,
                             egui::FontFamily::Proportional,
                         ),
                         (
                             format!(
                                 "{}{}",
                                 if entry.approximate { "≈ " } else { "" },
-                                entry.result
+                                group_number(&entry.result)
                             ),
                             19.0,
                             p.ink,
-                            24.0,
+                            29.0,
                             egui::FontFamily::Monospace,
                         ),
                     ] {
@@ -807,7 +941,7 @@ fn history(app: &mut CalculatorApp, ui: &mut egui::Ui, p: Palette) {
                     if response
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .on_hover_text(format!(
-                            "{} = {}\nRestore calculation",
+                            "{} = {}\nClick to edit this calculation\nThe copy button copies only the result",
                             entry.expression, entry.result
                         ))
                         .clicked()
@@ -823,7 +957,7 @@ fn history(app: &mut CalculatorApp, ui: &mut egui::Ui, p: Palette) {
                     );
                     let copy = ui
                         .scope_builder(egui::UiBuilder::new().max_rect(copy_rect), |ui| {
-                            icon_button(ui, "⧉", "Copy history result", false)
+                            icon_button(ui, "⧉", "Copy result", false)
                         })
                         .inner;
                     if copy.clicked() {
@@ -835,5 +969,68 @@ fn history(app: &mut CalculatorApp, ui: &mut egui::Ui, p: Palette) {
         });
     if let Some(entry) = recall {
         app.restore_calculation(&entry);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_expression_uses_clear_mathematical_notation() {
+        for (raw, shown) in [
+            ("asin(30)+2", "sin⁻¹(30)+2"),
+            ("atan(1)*2", "tan⁻¹(1) × 2"),
+            ("128*0.85", "128 × 0.85"),
+            ("pi", "π"),
+        ] {
+            assert_eq!(display_expression(raw), shown);
+        }
+    }
+
+    #[test]
+    fn grouped_numbers_preserve_sign_fraction_and_exponent() {
+        for (raw, display) in [
+            ("0", "0"),
+            ("123", "123"),
+            ("1234", "1,234"),
+            ("-1234567.00012", "-1,234,567.00012"),
+            ("12345e-12", "12,345e-12"),
+            ("1.234E+20", "1.234E+20"),
+            (
+                "1234567890123456789012345678",
+                "1,234,567,890,123,456,789,012,345,678",
+            ),
+        ] {
+            assert_eq!(group_number(raw), display);
+        }
+    }
+
+    #[test]
+    fn secondary_text_meets_aa_contrast_in_both_themes() {
+        fn luminance(c: Color32) -> f32 {
+            let linear = |v: u8| {
+                let v = v as f32 / 255.0;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(c.r()) + 0.7152 * linear(c.g()) + 0.0722 * linear(c.b())
+        }
+        for theme in [Theme::Light, Theme::Dark] {
+            let ctx = egui::Context::default();
+            apply_theme(&ctx, theme);
+            let p = palette(&ctx);
+            for surface in [p.bg, p.panel, p.key, p.special, p.science, p.accent_soft] {
+                for text in [p.ink, p.muted, p.accent] {
+                    let a = luminance(text);
+                    let b = luminance(surface);
+                    let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+                    assert!(ratio >= 4.5, "contrast {ratio}: {text:?} on {surface:?}");
+                }
+            }
+        }
     }
 }
