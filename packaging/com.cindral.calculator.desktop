@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Calculator
+GenericName=Calculator
+Comment=A keyboard-first desktop calculator
+Exec=cindral-calculator
+Icon=com.cindral.calculator
+Terminal=false
+Categories=Utility;Calculator;
+Keywords=math;arithmetic;scientific;
+StartupWMClass=com.cindral.calculator
