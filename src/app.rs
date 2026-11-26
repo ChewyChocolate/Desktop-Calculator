@@ -6,6 +6,12 @@ use crate::{
 use eframe::egui;
 use std::time::{Duration, Instant};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CopyTarget {
+    Result,
+    History(usize),
+}
+
 pub struct CalculatorApp {
     pub settings: Settings,
     pub history: History,
@@ -19,6 +25,9 @@ pub struct CalculatorApp {
     pub result_valid: bool,
     pub evaluate_requested: bool,
     pub cleared_history: Option<Vec<Entry>>,
+    pub flash_key: Option<(&'static str, Instant)>,
+    pub copied_target: Option<(CopyTarget, Instant)>,
+    cleared_expression: Option<String>,
     approximate_input: bool,
     repeat: Option<(char, Value)>,
     value: Option<Value>,
@@ -50,6 +59,9 @@ impl CalculatorApp {
             result_valid: false,
             evaluate_requested: false,
             cleared_history: None,
+            flash_key: None,
+            copied_target: None,
+            cleared_expression: None,
             approximate_input: false,
             repeat: None,
             value: None,
@@ -57,6 +69,33 @@ impl CalculatorApp {
     }
     pub fn notify(&mut self, message: &str) {
         self.notice = Some((message.into(), Instant::now()));
+    }
+    pub fn flash(&mut self, action: &'static str) {
+        self.flash_key = Some((action, Instant::now()));
+    }
+    pub fn is_flashing(&self, action: &str) -> bool {
+        self.flash_key
+            .is_some_and(|(k, at)| k == action && at.elapsed() < Duration::from_millis(120))
+    }
+    pub fn is_copied(&self, target: CopyTarget) -> bool {
+        self.copied_target
+            .is_some_and(|(t, at)| t == target && at.elapsed() < Duration::from_millis(1500))
+    }
+    pub fn clear_with_undo(&mut self) {
+        if self.expression.is_empty() {
+            self.clear();
+            return;
+        }
+        let saved = self.expression.clone();
+        self.clear();
+        self.cleared_expression = Some(saved);
+        self.notify("Cleared · Ctrl+Z to undo");
+    }
+    pub fn undo_clear(&mut self) {
+        if let Some(expr) = self.cleared_expression.take() {
+            self.edit_expression(expr);
+            self.notify("Calculation restored");
+        }
     }
     pub fn clear(&mut self) {
         self.expression.clear();
@@ -79,11 +118,119 @@ impl CalculatorApp {
                 self.clear();
             }
         }
-        if self.expression.len() + text.len() > 2048 {
+        let mut to_insert = text.to_owned();
+        match text {
+            "+" | "-" | "*" | "/" | "^" => {
+                let last = self.expression.chars().last();
+                if ends_with_sci_e(&self.expression) {
+                    if !matches!(text, "+" | "-") {
+                        return;
+                    }
+                } else if ends_with_sci_sign(&self.expression) {
+                    if !matches!(text, "+" | "-") {
+                        return;
+                    }
+                    self.expression.pop();
+                } else if self.expression.is_empty() || last == Some('(') {
+                    if text != "-" {
+                        return;
+                    }
+                } else if matches!(last, Some('+' | '-' | '*' | '/' | '^')) {
+                    if self.expression == "-" || self.expression.ends_with("(-") {
+                        return;
+                    }
+                    while matches!(
+                        self.expression.chars().last(),
+                        Some('+' | '-' | '*' | '/' | '^')
+                    ) {
+                        self.expression.pop();
+                    }
+                }
+            }
+            "%" | "!" => {
+                if !ends_with_value(&self.expression)
+                    || matches!(self.expression.chars().last(), Some('%' | '!'))
+                {
+                    return;
+                }
+            }
+            "." => {
+                let start = operand_start(&self.expression);
+                let operand = &self.expression[start..];
+                if operand.contains('.') || operand.contains(['e', 'E']) {
+                    return;
+                }
+                if ends_with_value(&self.expression)
+                    && !self
+                        .expression
+                        .chars()
+                        .last()
+                        .is_some_and(|c| c.is_ascii_digit())
+                {
+                    to_insert = "*0.".into();
+                } else if operand.is_empty() || operand == "-" {
+                    to_insert = "0.".into();
+                }
+            }
+            "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => {
+                let start = operand_start(&self.expression);
+                let operand = &self.expression[start..];
+                if operand == "0" || operand == "-0" {
+                    if text == "0" {
+                        return;
+                    }
+                    self.expression.pop();
+                } else if ends_with_value(&self.expression)
+                    && !self
+                        .expression
+                        .chars()
+                        .last()
+                        .is_some_and(|c| c.is_ascii_digit())
+                    && !self.expression.ends_with('.')
+                {
+                    to_insert = format!("*{text}");
+                }
+            }
+            "(" | "pi" => {
+                if ends_with_value(&self.expression) {
+                    to_insert = format!("*{text}");
+                }
+            }
+            "e" | "E" => {
+                let start = operand_start(&self.expression);
+                let operand = &self.expression[start..];
+                if operand.contains(['e', 'E'])
+                    && operand
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_digit() || c == '.')
+                {
+                    return;
+                }
+                if ends_with_value(&self.expression)
+                    && !self
+                        .expression
+                        .chars()
+                        .last()
+                        .is_some_and(|c| c.is_ascii_digit())
+                {
+                    to_insert = format!("*{text}");
+                }
+            }
+            ")" => {
+                let open = self.expression.chars().filter(|&c| c == '(').count();
+                let close = self.expression.chars().filter(|&c| c == ')').count();
+                if open <= close || !ends_with_value(&self.expression) {
+                    return;
+                }
+            }
+            _ => {}
+        }
+        if self.expression.len() + to_insert.len() > 2048 {
             self.notify("Expression limit reached");
             return;
         }
-        self.expression.push_str(text);
+        self.expression.push_str(&to_insert);
         self.error = None;
         self.repeat = None;
         self.preview();
@@ -137,7 +284,61 @@ impl CalculatorApp {
         if self.evaluated {
             self.start_from_result();
         }
+        if !ends_with_value(&self.expression) {
+            return;
+        }
         self.insert("^(1/");
+    }
+    pub fn insert_exponent(&mut self) {
+        if self.evaluated {
+            self.start_from_result();
+        }
+        let start = operand_start(&self.expression);
+        let operand = &self.expression[start..];
+        if operand.contains(['e', 'E']) {
+            return;
+        }
+        let to_insert = if self.expression.ends_with('.') {
+            self.expression.pop();
+            "e"
+        } else if self
+            .expression
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_ascii_digit())
+        {
+            "e"
+        } else if ends_with_value(&self.expression) {
+            "*1e"
+        } else {
+            "1e"
+        };
+        if self.expression.len() + to_insert.len() > 2048 {
+            self.notify("Expression limit reached");
+            return;
+        }
+        self.expression.push_str(to_insert);
+        self.error = None;
+        self.repeat = None;
+        self.preview();
+    }
+    pub fn insert_constant(&mut self, constant: &str) {
+        if self.evaluated {
+            self.clear();
+        }
+        let to_insert = if ends_with_value(&self.expression) {
+            format!("*{constant}")
+        } else {
+            constant.to_owned()
+        };
+        if self.expression.len() + to_insert.len() > 2048 {
+            self.notify("Expression limit reached");
+            return;
+        }
+        self.expression.push_str(&to_insert);
+        self.error = None;
+        self.repeat = None;
+        self.preview();
     }
     pub fn clear_history(&mut self) {
         if !self.history.entries.is_empty() {
@@ -172,7 +373,13 @@ impl CalculatorApp {
             }
             return;
         } else {
-            self.expression.clone()
+            let mut expr = self.expression.clone();
+            let open = expr.chars().filter(|&c| c == '(').count();
+            let close = expr.chars().filter(|&c| c == ')').count();
+            if open > close && ends_with_value(&expr) {
+                expr.extend(std::iter::repeat_n(')', open - close));
+            }
+            expr
         };
         match calculator::evaluate(&expression, self.settings.angle) {
             Ok(e) => self.commit(expression, e.value, e.repeat),
@@ -242,16 +449,38 @@ impl CalculatorApp {
         }
         let start = operand_start(&self.expression);
         let operand = self.expression[start..].to_owned();
-        if operand.is_empty() {
+        if ends_with_sci_e(&self.expression) {
             if operation == "sign" {
                 self.insert("-");
+            }
+            return;
+        }
+        if ends_with_sci_sign(&self.expression) {
+            if operation == "sign" {
+                if self.expression.ends_with('-') {
+                    self.expression.pop();
+                } else {
+                    self.expression.pop();
+                    self.expression.push('-');
+                }
+                self.error = None;
+                self.repeat = None;
+                self.preview();
+            }
+            return;
+        }
+        if operand.is_empty() {
+            if operation == "sign" {
+                if self.expression.ends_with('(') {
+                    self.insert("-");
+                }
             } else if !matches!(operation, "square" | "reciprocal") {
                 self.insert(&format!("{operation}("));
             }
             return;
         }
         let replacement = match operation {
-            "sign" => format!("-({operand})"),
+            "sign" => toggle_sign(&operand, &self.expression[..start]),
             "square" => format!("({operand})^2"),
             "reciprocal" => format!("(1/({operand}))"),
             _ => format!("{operation}({operand})"),
@@ -307,6 +536,7 @@ impl CalculatorApp {
             return;
         }
         ctx.copy_text(self.result.clone());
+        self.copied_target = Some((CopyTarget::Result, Instant::now()));
         self.notify("Result copied");
     }
     pub fn toggle_angle(&mut self) {
@@ -326,6 +556,78 @@ pub fn normalize_expression(text: &str) -> String {
         .replace('×', "*")
         .replace('÷', "/")
         .replace('π', "pi")
+}
+fn ends_with_sci_e(s: &str) -> bool {
+    let mut chars = s.chars().rev();
+    matches!(chars.next(), Some('e' | 'E')) && chars.next().is_some_and(|c| c.is_ascii_digit())
+}
+fn ends_with_sci_sign(s: &str) -> bool {
+    let mut chars = s.chars().rev();
+    matches!(chars.next(), Some('+' | '-'))
+        && matches!(chars.next(), Some('e' | 'E'))
+        && chars.next().is_some_and(|c| c.is_ascii_digit())
+}
+fn ends_with_value(s: &str) -> bool {
+    let Some(last) = s.chars().last() else {
+        return false;
+    };
+    if last.is_ascii_digit() || matches!(last, ')' | '%' | '!') {
+        return true;
+    }
+    if let Some(before) = s.strip_suffix("pi") {
+        return !before
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_ascii_alphabetic());
+    }
+    if let Some(before) = s.strip_suffix('e') {
+        return !before
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '.');
+    }
+    false
+}
+fn wrapped_in_parens(s: &str) -> bool {
+    if !s.starts_with('(') || !s.ends_with(')') {
+        return false;
+    }
+    let mut depth = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 && i + 1 < s.len() {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+fn toggle_sign(operand: &str, prefix: &str) -> String {
+    if let Some(rest) = operand.strip_prefix('-') {
+        if wrapped_in_parens(rest) {
+            return rest[1..rest.len() - 1].to_owned();
+        }
+        return rest.to_owned();
+    }
+    if wrapped_in_parens(operand)
+        && let Some(inner) = operand[1..operand.len() - 1].strip_prefix('-')
+    {
+        return inner.to_owned();
+    }
+    if operand.parse::<f64>().is_ok() {
+        if prefix.is_empty() || matches!(prefix.chars().last(), Some('(' | '*' | '/' | '^')) {
+            format!("-{operand}")
+        } else {
+            format!("(-{operand})")
+        }
+    } else {
+        format!("-({operand})")
+    }
 }
 // Locate the last complete operand, preserving scientific exponent signs.
 fn operand_start(s: &str) -> usize {
@@ -366,6 +668,22 @@ impl eframe::App for CalculatorApp {
                 ctx.request_repaint_after(remaining);
             }
         }
+        if let Some((_, at)) = self.flash_key {
+            let remaining = Duration::from_millis(120).saturating_sub(at.elapsed());
+            if remaining.is_zero() {
+                self.flash_key = None;
+            } else {
+                ctx.request_repaint_after(remaining);
+            }
+        }
+        if let Some((_, at)) = self.copied_target {
+            let remaining = Duration::from_millis(1500).saturating_sub(at.elapsed());
+            if remaining.is_zero() {
+                self.copied_target = None;
+            } else {
+                ctx.request_repaint_after(remaining);
+            }
+        }
     }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, "settings", &self.settings);
@@ -392,6 +710,9 @@ mod tests {
             result_valid: false,
             evaluate_requested: false,
             cleared_history: None,
+            flash_key: None,
+            copied_target: None,
+            cleared_expression: None,
             approximate_input: false,
             repeat: None,
             value: None,
@@ -802,7 +1123,7 @@ mod tests {
         editor_frame(&mut a, &ctx, vec![]);
         let output = editor_frame(&mut a, &ctx, vec![]);
         text_bounds(&output, "1,234");
-        let pos = text_bounds(&output, "Current entry").center();
+        let pos = text_bounds(&output, "Edit value").center();
         assert!(!output.shapes.iter().any(
             |s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.text() == "1234")
         ));
@@ -1047,10 +1368,10 @@ mod tests {
         };
         a.edit_expression("2+3".into());
         let output = editor_frame(&mut a, &ctx, vec![]);
-        assert!(body(&output, "Preview · Enter evaluates"));
+        assert!(body(&output, "Preview"));
         a.evaluate();
         let output = editor_frame(&mut a, &ctx, vec![]);
-        assert!(body(&output, "= Result"));
+        assert!(!body(&output, "Preview"));
         a.edit_expression("1/0".into());
         let output = editor_frame(&mut a, &ctx, vec![]);
         assert!(body(&output, "Cannot divide by zero"));
@@ -1343,6 +1664,142 @@ mod tests {
         assert_eq!(a.result, "2");
         assert!(a.result_valid);
     }
+
+    #[test]
+    fn input_guards_prevent_stacking_and_invalid_sequences() {
+        // Binary operators: ignore leading non-minus, replace trailing operator, allow 2*-4.
+        let mut a = app();
+        for op in ["+", "*", "/", "^", "%", "!"] {
+            a.insert(op);
+        }
+        assert_eq!(a.expression, "");
+        a.nth_root();
+        assert_eq!(a.expression, "");
+        a.insert("-");
+        a.insert("-");
+        a.insert("*");
+        assert_eq!(a.expression, "-");
+        a.clear();
+        a.insert("5");
+        a.insert("+");
+        a.insert("+");
+        assert_eq!(a.expression, "5+");
+        a.insert("*");
+        assert_eq!(a.expression, "5*");
+        a.insert("-");
+        assert_eq!(a.expression, "5-");
+        a.insert("-");
+        assert_eq!(a.expression, "5-");
+        a.insert("+");
+        assert_eq!(a.expression, "5+");
+
+        // Decimal points and leading zeros.
+        a.clear();
+        a.insert(".");
+        a.insert(".");
+        a.insert("5");
+        a.insert(".");
+        assert_eq!(a.expression, "0.5");
+        a.clear();
+        a.insert("0");
+        a.insert("0");
+        assert_eq!(a.expression, "0");
+        a.insert("7");
+        assert_eq!(a.expression, "7");
+        a.insert("+");
+        a.insert(".");
+        assert_eq!(a.expression, "7+0.");
+
+        // Sign toggle does not stack -(...) wrappers.
+        a.clear();
+        a.insert("5");
+        a.unary("sign");
+        assert_eq!(a.expression, "-5");
+        a.unary("sign");
+        assert_eq!(a.expression, "5");
+        a.insert("+");
+        a.insert("3");
+        a.unary("sign");
+        assert_eq!(a.expression, "5+(-3)");
+        a.unary("sign");
+        assert_eq!(a.expression, "5+3");
+
+        // Postfix operators do not stack.
+        a.clear();
+        a.insert("5");
+        a.insert("%");
+        a.insert("%");
+        a.insert("!");
+        assert_eq!(a.expression, "5%");
+
+        // Unmatched ')' is ignored; open '(' auto-closes on evaluate; implicit '*'.
+        a.clear();
+        a.insert(")");
+        assert_eq!(a.expression, "");
+        a.insert("2");
+        a.insert("(");
+        a.insert("3");
+        a.insert("+");
+        a.insert("4");
+        a.evaluate();
+        assert_eq!(a.expression, "2*(3+4)");
+        assert_eq!(a.result, "14");
+
+        a.clear();
+        a.insert("2");
+        a.insert("pi");
+        assert_eq!(a.expression, "2*pi");
+
+        // Scientific notation entry via EE button and keyboard without mid-typing errors.
+        a.clear();
+        a.insert_exponent();
+        assert_eq!(a.expression, "1e");
+        assert!(a.error.is_none());
+        a.insert_exponent();
+        assert_eq!(a.expression, "1e");
+        a.insert("*");
+        assert_eq!(a.expression, "1e");
+        a.insert("+");
+        assert_eq!(a.expression, "1e+");
+        assert!(a.error.is_none());
+        a.insert("-");
+        assert_eq!(a.expression, "1e-");
+        assert!(a.error.is_none());
+        a.insert(".");
+        assert_eq!(a.expression, "1e-");
+        a.insert("3");
+        a.evaluate();
+        assert_eq!(a.result, "0.001");
+
+        // Keypad Euler's constant 'e' after digit inserts '*e' (not scientific '2e').
+        a.clear();
+        a.insert("2");
+        a.insert_constant("e");
+        assert_eq!(a.expression, "2*e");
+        assert!(a.result_valid);
+
+        // Keyboard duplicate 'e', sign toggle on '1e', and unary guard on incomplete '1e'.
+        a.clear();
+        a.insert("2");
+        a.insert("e");
+        a.insert("e");
+        assert_eq!(a.expression, "2e");
+        a.unary("square");
+        assert_eq!(a.expression, "2e");
+        a.unary("sign");
+        assert_eq!(a.expression, "2e-");
+        a.unary("sign");
+        assert_eq!(a.expression, "2e");
+
+        // Accidental Clear can be undone.
+        a.clear();
+        a.insert("12+34");
+        a.clear_with_undo();
+        assert_eq!(a.expression, "");
+        a.undo_clear();
+        assert_eq!(a.expression, "12+34");
+        assert_eq!(a.result, "46");
+    }
     #[test]
     fn recalled_approximation_survives_continuation_and_repeat() {
         let mut a = app();
@@ -1446,7 +1903,7 @@ mod tests {
                     })
                     .unwrap_or_else(|| panic!("Missing {value}"))
             };
-            let expression = bounds("128*0.85");
+            let expression = bounds("128 × 0.85");
             let result = bounds("108.8");
             assert!(
                 (expression.right() - result.right()).abs() < 4.0,

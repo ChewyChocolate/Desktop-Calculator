@@ -51,12 +51,20 @@ pub fn handle(app: &mut CalculatorApp, ctx: &egui::Context) {
                 if modifiers.command {
                     if key == Key::C && !editing {
                         app.copy(ctx);
+                    } else if key == Key::Z && !editing {
+                        app.undo_clear();
                     }
                     continue;
                 }
                 match key {
-                    Key::Enter if editing => app.evaluate_requested = true,
-                    Key::Enter => app.evaluate(),
+                    Key::Enter if editing => {
+                        app.evaluate_requested = true;
+                        app.flash("=");
+                    }
+                    Key::Enter => {
+                        app.evaluate();
+                        app.flash("=");
+                    }
                     Key::Escape => {
                         if app.help_open {
                             app.help_open = false;
@@ -65,11 +73,18 @@ pub fn handle(app: &mut CalculatorApp, ctx: &egui::Context) {
                         {
                             app.settings.history_open = false;
                         } else {
-                            app.clear();
+                            app.clear_with_undo();
+                            app.flash("clear");
                         }
                     }
-                    Key::Backspace if !editing => app.backspace(),
-                    Key::Delete if !editing => app.clear_entry(),
+                    Key::Backspace if !editing => {
+                        app.backspace();
+                        app.flash("back");
+                    }
+                    Key::Delete if !editing => {
+                        app.clear_entry();
+                        app.flash("ce");
+                    }
                     Key::F1 => app.help_open = !app.help_open,
                     _ => {}
                 }
@@ -97,6 +112,9 @@ pub fn handle(app: &mut CalculatorApp, ctx: &egui::Context) {
             }
             Event::Text(text) if !editing && !app.help_open => {
                 for c in text.chars() {
+                    if let Some(action) = key_action(c) {
+                        app.flash(action);
+                    }
                     match c {
                         '=' => app.evaluate(),
                         '0'..='9'
@@ -138,4 +156,31 @@ pub fn handle(app: &mut CalculatorApp, ctx: &egui::Context) {
                 .retain(|event| !matches!(event, Event::Text(text) if text == "="));
         }
     });
+}
+fn key_action(c: char) -> Option<&'static str> {
+    Some(match c {
+        '0' => "0",
+        '1' => "1",
+        '2' => "2",
+        '3' => "3",
+        '4' => "4",
+        '5' => "5",
+        '6' => "6",
+        '7' => "7",
+        '8' => "8",
+        '9' => "9",
+        '.' => ".",
+        '+' => "+",
+        '-' | '−' => "-",
+        '*' | '×' => "*",
+        '/' | '÷' => "/",
+        '^' => "^",
+        '%' => "%",
+        '!' => "!",
+        '(' => "(",
+        ')' => ")",
+        '=' => "=",
+        'π' => "pi",
+        _ => return None,
+    })
 }

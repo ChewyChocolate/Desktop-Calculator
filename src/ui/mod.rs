@@ -1,4 +1,8 @@
-use crate::{app::CalculatorApp, calculator::Angle, settings::Theme};
+use crate::{
+    app::{CalculatorApp, CopyTarget},
+    calculator::Angle,
+    settings::Theme,
+};
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Stroke, Vec2};
 
 #[derive(Clone, Copy)]
@@ -110,7 +114,7 @@ fn icon_button(ui: &mut egui::Ui, label: &str, tip: &str, selected: bool) -> egu
                 [TOOL_SIZE, TOOL_SIZE],
                 egui::Button::new(RichText::new(""))
                     .selected(selected)
-                    .frame_when_inactive(label != "⧉"),
+                    .frame_when_inactive(!matches!(label, "⧉" | "✓")),
             )
         })
         .inner;
@@ -127,7 +131,9 @@ fn paint_icon(ui: &egui::Ui, response: &egui::Response, icon: &str) {
     let copy_at_rest = icon == "⧉" && !response.hovered() && !response.has_focus();
     let stroke = Stroke::new(
         1.5_f32,
-        if !response.enabled() {
+        if icon == "✓" {
+            p.accent
+        } else if !response.enabled() {
             p.muted.gamma_multiply(0.5)
         } else if copy_at_rest {
             p.muted
@@ -191,6 +197,10 @@ fn paint_icon(ui: &egui::Ui, response: &egui::Response, icon: &str) {
             line([-1.0, -3.0], [5.0, 3.0]);
             line([-1.0, 3.0], [5.0, -3.0]);
         }
+        "✓" => {
+            line([-5.0, 0.5], [-1.5, 4.0]);
+            line([-1.5, 4.0], [5.5, -4.0]);
+        }
         _ => {}
     }
 }
@@ -216,8 +226,12 @@ fn choice_button(
         .scope(|ui| {
             let widgets = &mut ui.style_mut().visuals.widgets;
             widgets.inactive.weak_bg_fill = if selected { p.accent_soft } else { p.panel };
+            widgets.inactive.bg_fill = widgets.inactive.weak_bg_fill;
+            widgets.inactive.bg_stroke = Stroke::NONE;
             widgets.hovered.weak_bg_fill = p.special;
+            widgets.hovered.bg_stroke = Stroke::NONE;
             widgets.active.weak_bg_fill = p.accent_soft;
+            widgets.active.bg_stroke = Stroke::NONE;
             ui.add_sized(
                 size,
                 egui::Button::new(RichText::new(label).size(14.0).color(if selected {
@@ -485,6 +499,48 @@ fn calculator_panel(app: &mut CalculatorApp, ui: &mut egui::Ui, ctx: &egui::Cont
                                 }
                             });
                         });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let response = ui
+                            .scope(|ui| {
+                                let dark = ui.visuals().dark_mode;
+                                let widgets = &mut ui.style_mut().visuals.widgets;
+                                widgets.inactive.weak_bg_fill = p.science;
+                                widgets.inactive.bg_fill = p.science;
+                                widgets.inactive.bg_stroke = if dark {
+                                    Stroke::NONE
+                                } else {
+                                    Stroke::new(0.5_f32, p.line)
+                                };
+                                widgets.hovered.weak_bg_fill =
+                                    p.science.gamma_multiply(if dark { 1.12 } else { 0.96 });
+                                widgets.hovered.bg_fill = widgets.hovered.weak_bg_fill;
+                                widgets.hovered.bg_stroke = Stroke::new(1.0_f32, p.line);
+                                widgets.active.weak_bg_fill = p.science.gamma_multiply(0.88);
+                                widgets.active.bg_fill = widgets.active.weak_bg_fill;
+                                widgets.active.bg_stroke = Stroke::new(1.5_f32, p.accent);
+                                ui.spacing_mut().button_padding = Vec2::new(8.0, 4.0);
+                                ui.add_sized(
+                                    [56.0, 30.0],
+                                    egui::Button::new(RichText::new("EE").size(14.0).color(p.ink))
+                                        .corner_radius(RADIUS),
+                                )
+                            })
+                            .inner;
+                        focus_ring(ui, &response, p);
+                        response.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                ui.is_enabled(),
+                                "Scientific notation (×10ˣ)",
+                            )
+                        });
+                        if response
+                            .on_hover_text("Scientific notation (×10ˣ) · type e")
+                            .clicked()
+                        {
+                            app.insert_exponent();
+                        }
+                    });
                 });
                 let science = [
                     [
@@ -544,26 +600,47 @@ fn display(app: &mut CalculatorApp, ui: &mut egui::Ui, ctx: &egui::Context, p: P
             ui.spacing_mut().item_spacing.y = 2.0;
             let editor_id = egui::Id::new("expression_editor");
             let entry_only = !app.expression.is_empty() && app.expression.parse::<f64>().is_ok();
+            let formatted = display_expression(&app.expression);
+            let show_formatted = !app.expression.is_empty() && formatted != app.expression;
             let editing = ctx.memory(|m| m.has_focus(editor_id));
             let editor_size = Vec2::new((ui.available_width() - TOOL_SIZE - GAP).max(1.0), 24.0);
-            if entry_only && !editing {
-                // A lone number is already visible at full size below. Keep the editor
-                // discoverable without echoing the same number in two places.
+            if (entry_only || show_formatted) && !editing {
+                // Keep a lone number un-duplicated, and render formatted math symbols
+                // (×, ÷, π, sin⁻¹) until the user clicks to edit the raw expression.
                 let (rect, response) = ui.allocate_exact_size(editor_size, egui::Sense::click());
-                ui.painter().text(
-                    rect.right_center(),
-                    egui::Align2::RIGHT_CENTER,
-                    "Edit value",
-                    FontId::proportional(14.0),
-                    p.muted,
-                );
+                let (label_text, font_size) = if entry_only {
+                    ("Edit value", 14.0)
+                } else {
+                    (formatted.as_str(), 17.0)
+                };
+                ui.painter()
+                    .with_clip_rect(rect.intersect(ui.clip_rect()))
+                    .text(
+                        rect.right_center(),
+                        egui::Align2::RIGHT_CENTER,
+                        label_text,
+                        FontId::proportional(font_size),
+                        p.muted,
+                    );
                 focus_ring(ui, &response, p);
                 response.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Edit value")
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        if entry_only {
+                            "Edit value"
+                        } else {
+                            "Edit expression"
+                        },
+                    )
                 });
                 if response
                     .on_hover_cursor(egui::CursorIcon::Text)
-                    .on_hover_text("Click to edit this value")
+                    .on_hover_text(if entry_only {
+                        "Click to edit this value"
+                    } else {
+                        "Click to edit expression"
+                    })
                     .clicked()
                 {
                     app.begin_edit();
@@ -619,7 +696,7 @@ fn display(app: &mut CalculatorApp, ui: &mut egui::Ui, ctx: &egui::Context, p: P
                             .max_height(result_height)
                             .stick_to_right(true)
                             .show(ui, |ui| {
-                                ui.add(
+                                let label = ui.add(
                                     egui::Label::new(
                                         RichText::new(&result).font(FontId::monospace(size)).color(
                                             if app.evaluated || app.expression.is_empty() {
@@ -632,14 +709,34 @@ fn display(app: &mut CalculatorApp, ui: &mut egui::Ui, ctx: &egui::Context, p: P
                                         ),
                                     )
                                     .wrap_mode(egui::TextWrapMode::Extend)
-                                    .selectable(false),
+                                    .selectable(false)
+                                    .sense(
+                                        if app.result_valid {
+                                            egui::Sense::click()
+                                        } else {
+                                            egui::Sense::hover()
+                                        },
+                                    ),
                                 );
+                                if app.result_valid
+                                    && label
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .on_hover_text("Click to copy result · Ctrl/Cmd+C")
+                                        .clicked()
+                                {
+                                    app.copy(ctx);
+                                }
                             });
                     },
                 );
+                let copy_icon = if app.is_copied(CopyTarget::Result) {
+                    "✓"
+                } else {
+                    "⧉"
+                };
                 if ui
                     .add_enabled_ui(app.result_valid, |ui| {
-                        icon_button(ui, "⧉", "Copy result · Ctrl/Cmd+C", false)
+                        icon_button(ui, copy_icon, "Copy result · Ctrl/Cmd+C", false)
                     })
                     .inner
                     .clicked()
@@ -659,13 +756,17 @@ fn display(app: &mut CalculatorApp, ui: &mut egui::Ui, ctx: &egui::Context, p: P
                 ("Preview", p.muted)
             };
             // Reserve one line so errors and copy feedback never move the keypad.
-            let (rect, _) =
-                ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), egui::Sense::hover());
-            ui.put(
-                rect,
-                egui::Label::new(RichText::new(status.0).size(13.0).color(status.1)).truncate(),
-            )
-            .on_hover_text(status.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), 20.0),
+                Layout::right_to_left(Align::Center),
+                |ui| {
+                    ui.add(
+                        egui::Label::new(RichText::new(status.0).size(13.0).color(status.1))
+                            .truncate(),
+                    )
+                    .on_hover_text(status.0);
+                },
+            );
         });
 }
 fn key_row<const N: usize>(
@@ -708,13 +809,21 @@ fn key_row<const N: usize>(
             } else {
                 p.ink
             };
+            let flashing = app.is_flashing(action);
             let response = ui
                 .scope(|ui| {
                     let dark = ui.visuals().dark_mode;
                     let widgets = &mut ui.style_mut().visuals.widgets;
-                    widgets.inactive.weak_bg_fill = fill;
-                    widgets.inactive.bg_fill = fill;
-                    widgets.inactive.bg_stroke = if dark {
+                    let rest_fill = if flashing {
+                        fill.gamma_multiply(0.88)
+                    } else {
+                        fill
+                    };
+                    widgets.inactive.weak_bg_fill = rest_fill;
+                    widgets.inactive.bg_fill = rest_fill;
+                    widgets.inactive.bg_stroke = if flashing {
+                        Stroke::new(1.5_f32, p.accent)
+                    } else if dark {
                         Stroke::NONE
                     } else {
                         Stroke::new(0.5_f32, p.line)
@@ -800,12 +909,13 @@ fn key_row<const N: usize>(
             if response.clicked() {
                 match action {
                     "ce" => app.clear_entry(),
-                    "clear" => app.clear(),
+                    "clear" => app.clear_with_undo(),
                     "back" => app.backspace(),
                     "=" => app.evaluate(),
                     "reciprocal" | "square" | "sqrt" | "sign" | "sin" | "cos" | "tan" | "asin"
                     | "acos" | "atan" | "ln" | "log" => app.unary(action),
                     "root" => app.nth_root(),
+                    "pi" | "e" => app.insert_constant(action),
                     _ => app.insert(action),
                 }
             }
@@ -867,6 +977,16 @@ fn history(app: &mut CalculatorApp, ui: &mut egui::Ui, p: Palette, show_heading:
         );
     }
     let mut recall = None;
+    let mut copied = None;
+    let copied_history = app.copied_target.and_then(|(t, at)| {
+        if at.elapsed() < std::time::Duration::from_millis(1500)
+            && let CopyTarget::History(idx) = t
+        {
+            Some(idx)
+        } else {
+            None
+        }
+    });
     egui::ScrollArea::vertical()
         .id_salt("history_list")
         .auto_shrink([false, false])
@@ -969,18 +1089,27 @@ fn history(app: &mut CalculatorApp, ui: &mut egui::Ui, p: Palette, show_heading:
                         ),
                         Vec2::splat(TOOL_SIZE),
                     );
+                    let copy_icon = if copied_history == Some(i) {
+                        "✓"
+                    } else {
+                        "⧉"
+                    };
                     let copy = ui
                         .scope_builder(egui::UiBuilder::new().max_rect(copy_rect), |ui| {
-                            icon_button(ui, "⧉", "Copy result", false)
+                            icon_button(ui, copy_icon, "Copy result", false)
                         })
                         .inner;
                     if copy.clicked() {
                         ui.ctx().copy_text(entry.result.clone());
-                        app.notice = Some(("Result copied".into(), std::time::Instant::now()));
+                        copied = Some(i);
                     }
                 });
             }
         });
+    if let Some(i) = copied {
+        app.copied_target = Some((CopyTarget::History(i), std::time::Instant::now()));
+        app.notice = Some(("Result copied".into(), std::time::Instant::now()));
+    }
     if let Some(entry) = recall {
         app.restore_calculation(&entry);
     }

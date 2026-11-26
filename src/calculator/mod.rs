@@ -62,6 +62,7 @@ impl CalcError {
             "Enter a number or complete the expression"
                 | "Missing closing parenthesis"
                 | "A function needs parentheses"
+                | "Incomplete scientific notation"
         )
     }
 }
@@ -139,6 +140,7 @@ pub fn binary(op: char, a: Value, b: Value) -> Result<Value, CalcError> {
             '*' => a.checked_mul(b),
             '/' => a.checked_div(b),
             '^' => {
+                let mut ok = true;
                 if b.fract().is_zero() && b.abs() <= Decimal::from(1000) {
                     let n = b.to_i32().unwrap();
                     let mut result = Decimal::ONE;
@@ -146,50 +148,62 @@ pub fn binary(op: char, a: Value, b: Value) -> Result<Value, CalcError> {
                     let mut power = n.unsigned_abs();
                     while power > 0 {
                         if power & 1 == 1 {
-                            result = result
-                                .checked_mul(base)
-                                .ok_or(CalcError("Decimal overflow"))?;
+                            match result.checked_mul(base) {
+                                Some(v) => result = v,
+                                None => {
+                                    ok = false;
+                                    break;
+                                }
+                            }
                         }
                         power >>= 1;
                         if power > 0 {
-                            base = base
-                                .checked_mul(base)
-                                .ok_or(CalcError("Decimal overflow"))?;
+                            match base.checked_mul(base) {
+                                Some(v) => base = v,
+                                None => {
+                                    ok = false;
+                                    break;
+                                }
+                            }
                         }
                     }
-                    if n < 0 {
+                    if !ok {
+                        None
+                    } else if n < 0 {
                         Decimal::ONE.checked_div(result)
                     } else {
                         Some(result)
                     }
                 } else {
-                    return Value::scientific(a.to_f64().unwrap().powf(b.to_f64().unwrap()));
+                    None
                 }
             }
             _ => None,
         };
-        if result.is_some_and(|r| r.is_zero())
+        let underflow = result.is_some_and(|r| r.is_zero())
             && !a.is_zero()
             && !b.is_zero()
-            && matches!(op, '*' | '/' | '^')
+            && matches!(op, '*' | '/' | '^');
+        if let Some(d) = result
+            && !underflow
         {
-            return Err(CalcError(
-                "Result is below decimal precision; use scientific notation",
-            ));
+            return Ok(Value::Decimal(d));
         }
-        return result
-            .map(Value::Decimal)
-            .ok_or(CalcError("Decimal overflow or invalid power"));
+        // Promote decimal overflow/underflow into IEEE-754 scientific notation.
     }
     let (a, b) = (a.as_f64(), b.as_f64());
-    Value::scientific(match op {
+    let f = match op {
         '+' => a + b,
         '-' => a - b,
         '*' => a * b,
         '/' => a / b,
         '^' => a.powf(b),
         _ => return Err(CalcError("Unknown operator")),
-    })
+    };
+    if f == 0.0 && a != 0.0 && b != 0.0 && matches!(op, '*' | '/' | '^') {
+        return Err(CalcError("Number is below scientific precision"));
+    }
+    Value::scientific(f)
 }
 impl Node {
     fn eval(&self, angle: Angle) -> Result<Value, CalcError> {
@@ -364,10 +378,10 @@ impl Parser<'_> {
             .s
             .get(self.pos)
             .is_some_and(|c| *c == b'e' || *c == b'E')
-            && self
+            && !self
                 .s
                 .get(self.pos + 1)
-                .is_some_and(|c| c.is_ascii_digit() || *c == b'+' || *c == b'-')
+                .is_some_and(u8::is_ascii_alphabetic)
         {
             self.pos += 1;
             if self
@@ -377,8 +391,12 @@ impl Parser<'_> {
             {
                 self.pos += 1;
             }
+            let exp_start = self.pos;
             while self.s.get(self.pos).is_some_and(u8::is_ascii_digit) {
                 self.pos += 1;
+            }
+            if self.pos == exp_start {
+                return Err(CalcError("Incomplete scientific notation"));
             }
         }
         let token = std::str::from_utf8(&self.s[start..self.pos]).unwrap();
@@ -387,17 +405,16 @@ impl Parser<'_> {
         } else {
             Decimal::from_str_exact(token)
         };
-        // Explicit scientific notation may use f64 outside the decimal range.
-        if token.contains(['e', 'E']) && (d.is_err() || d.as_ref().is_ok_and(|v| v.is_zero())) {
+        // Promote out-of-range literals and explicit scientific notation to f64.
+        let has_nonzero_mantissa = token
+            .split(['e', 'E'])
+            .next()
+            .is_some_and(|m| m.chars().any(|c| matches!(c, '1'..='9')));
+        if d.is_err() || (d.as_ref().is_ok_and(|v| v.is_zero()) && has_nonzero_mantissa) {
             let f = token
                 .parse::<f64>()
-                .map_err(|_| CalcError("Invalid scientific notation"))?;
-            if f == 0.0
-                && token
-                    .split(['e', 'E'])
-                    .next()
-                    .is_some_and(|m| m.chars().any(|c| matches!(c, '1'..='9')))
-            {
+                .map_err(|_| CalcError("Invalid number"))?;
+            if f == 0.0 && has_nonzero_mantissa {
                 return Err(CalcError("Number is below scientific precision"));
             }
             return Value::scientific(f).map(Node::Number);
@@ -418,9 +435,13 @@ mod tests {
         assert_eq!(Value::Scientific(1e14).text(), "100000000000000");
         assert_eq!(calc("1e100*2"), "2e100");
         assert_eq!(calc("1e-100*2"), "2e-100");
+        assert_eq!(calc("10^30"), "1e30");
+        assert_eq!(calc("1e-28/10"), "1e-29");
+        assert_eq!(calc("0.00000000000000000000000000001"), "1e-29");
         assert!(evaluate("1e-999", Angle::Degrees).is_err());
-        assert!(evaluate("0.00000000000000000000000000001", Angle::Degrees).is_err());
-        assert!(evaluate("1e-28/10", Angle::Degrees).is_err());
+        assert!(evaluate("1e", Angle::Degrees).unwrap_err().is_incomplete());
+        assert!(evaluate("1e-", Angle::Degrees).unwrap_err().is_incomplete());
+        assert!(evaluate("1e+", Angle::Degrees).unwrap_err().is_incomplete());
     }
     #[test]
     fn decimal_accuracy() {
@@ -477,7 +498,8 @@ mod tests {
     fn limits() {
         assert!(evaluate(&"(".repeat(100), Angle::Degrees).is_err());
         assert!(evaluate(&"1".repeat(2049), Angle::Degrees).is_err());
-        assert!(evaluate("9999999999999999999999999999*100", Angle::Degrees).is_err());
+        assert_eq!(calc("9999999999999999999999999999*100"), "1e30");
+        assert!(evaluate("1e308*10", Angle::Degrees).is_err());
     }
     #[test]
     fn repeat_rhs() {
