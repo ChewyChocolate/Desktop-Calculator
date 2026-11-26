@@ -18,7 +18,7 @@ struct Palette {
 // Logical-point tokens keep the same rhythm at every DPI and window size.
 const GAP: f32 = 8.0;
 const CONTENT_WIDTH: f32 = 480.0;
-const RADIUS: u8 = 6;
+const RADIUS: u8 = 8;
 const TOOL_SIZE: f32 = 36.0;
 pub(crate) const HISTORY_BREAKPOINT: f32 = 720.0;
 
@@ -228,13 +228,6 @@ fn choice_button(
             )
         })
         .inner;
-    if selected {
-        let r = response.rect.shrink2(Vec2::new(10.0, 3.0));
-        ui.painter().line_segment(
-            [r.left_bottom(), r.right_bottom()],
-            Stroke::new(2.0_f32, p.accent),
-        );
-    }
     response.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::WidgetType::SelectableLabel,
@@ -456,7 +449,7 @@ fn calculator_panel(app: &mut CalculatorApp, ui: &mut egui::Ui, ctx: &egui::Cont
     ui.add_space(GAP);
     display(app, ui, ctx, p);
     ui.add_space(GAP);
-    let sci_height = if app.settings.scientific { 176.0 } else { 0.0 };
+    let sci_height = if app.settings.scientific { 168.0 } else { 0.0 };
     // Whole-point rows leave rounding room so a fractional overflow cannot summon a scrollbar.
     let key_height = ((ui.available_height() - sci_height - GAP * 5.0 - 1.0) / 6.0)
         .floor()
@@ -466,22 +459,32 @@ fn calculator_panel(app: &mut CalculatorApp, ui: &mut egui::Ui, ctx: &egui::Cont
         .show(ui, |ui| {
             if app.settings.scientific {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.spacing_mut().item_spacing.x = GAP;
                     ui.label(RichText::new("Angle").size(13.0).color(p.muted));
-                    let degrees = app.settings.angle == Angle::Degrees;
-                    for (label, selected) in [("DEG", degrees), ("RAD", !degrees)] {
-                        if choice_button(ui, label, selected, Vec2::new(52.0, 32.0), p)
-                            .on_hover_text(format!(
-                                "Use {} for trigonometric calculations{}",
-                                if label == "DEG" { "degrees" } else { "radians" },
-                                if selected { " (selected)" } else { "" }
-                            ))
-                            .clicked()
-                            && !selected
-                        {
-                            app.toggle_angle();
-                        }
-                    }
+                    egui::Frame::new()
+                        .fill(p.panel)
+                        .corner_radius(RADIUS)
+                        .inner_margin(2)
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            ui.spacing_mut().button_padding = Vec2::new(8.0, 4.0);
+                            ui.horizontal(|ui| {
+                                let degrees = app.settings.angle == Angle::Degrees;
+                                for (label, selected) in [("DEG", degrees), ("RAD", !degrees)] {
+                                    if choice_button(ui, label, selected, Vec2::new(52.0, 26.0), p)
+                                        .on_hover_text(format!(
+                                            "Use {} for trigonometric calculations{}",
+                                            if label == "DEG" { "degrees" } else { "radians" },
+                                            if selected { " (selected)" } else { "" }
+                                        ))
+                                        .clicked()
+                                        && !selected
+                                    {
+                                        app.toggle_angle();
+                                    }
+                                }
+                            });
+                        });
                 });
                 let science = [
                     [
@@ -504,6 +507,13 @@ fn calculator_panel(app: &mut CalculatorApp, ui: &mut egui::Ui, ctx: &egui::Cont
                     key_row(app, ui, &row, 34.0, p, true);
                 }
                 ui.add_space(4.0);
+                let y = ui.cursor().top() - 6.0;
+                let left = ui.max_rect().left();
+                let right = ui.max_rect().right();
+                ui.painter().line_segment(
+                    [egui::pos2(left, y), egui::pos2(right, y)],
+                    Stroke::new(1.0_f32, p.line),
+                );
             }
             let rows = [
                 [("%", "%"), ("CE", "ce"), ("C", "clear"), ("⌫", "back")],
@@ -528,7 +538,7 @@ fn display(app: &mut CalculatorApp, ui: &mut egui::Ui, ctx: &egui::Context, p: P
     egui::Frame::new()
         .fill(p.panel)
         .corner_radius(RADIUS)
-        .inner_margin(if app.settings.scientific { 8 } else { 12 })
+        .inner_margin(8)
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 2.0;
@@ -544,7 +554,7 @@ fn display(app: &mut CalculatorApp, ui: &mut egui::Ui, ctx: &egui::Context, p: P
                     rect.right_center(),
                     egui::Align2::RIGHT_CENTER,
                     "Edit value",
-                    FontId::proportional(17.0),
+                    FontId::proportional(14.0),
                     p.muted,
                 );
                 focus_ring(ui, &response, p);
@@ -566,7 +576,7 @@ fn display(app: &mut CalculatorApp, ui: &mut egui::Ui, ctx: &egui::Context, p: P
                     editor_size,
                     egui::TextEdit::singleline(&mut expression)
                         .id(editor_id)
-                        .hint_text("Expression")
+                        .hint_text(RichText::new("Expression").size(14.0).color(p.muted))
                         .margin(Vec2::ZERO)
                         .font(FontId::proportional(17.0))
                         .text_color(p.muted)
@@ -704,7 +714,11 @@ fn key_row<const N: usize>(
                     let widgets = &mut ui.style_mut().visuals.widgets;
                     widgets.inactive.weak_bg_fill = fill;
                     widgets.inactive.bg_fill = fill;
-                    widgets.inactive.bg_stroke = Stroke::new(0.5_f32, p.line);
+                    widgets.inactive.bg_stroke = if dark {
+                        Stroke::NONE
+                    } else {
+                        Stroke::new(0.5_f32, p.line)
+                    };
                     widgets.hovered.weak_bg_fill =
                         fill.gamma_multiply(if dark { 1.12 } else { 0.96 });
                     widgets.hovered.bg_fill = widgets.hovered.weak_bg_fill;
@@ -812,7 +826,7 @@ fn history(app: &mut CalculatorApp, ui: &mut egui::Ui, p: Palette, show_heading:
             ui.label(RichText::new("History").size(17.0).strong());
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if icon_button(ui, "×", "Hide history", false).clicked() {
+            if show_heading && icon_button(ui, "×", "Hide history", false).clicked() {
                 app.settings.history_open = false;
             }
             ui.add_enabled_ui(!app.history.entries.is_empty(), |ui| {

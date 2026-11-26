@@ -26,10 +26,12 @@ pub struct CalculatorApp {
 impl CalculatorApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         crate::ui::install_fonts(&cc.egui_ctx);
-        let settings = cc
+        let mut settings: Settings = cc
             .storage
             .and_then(|s| eframe::get_value(s, "settings"))
             .unwrap_or_default();
+        // Always start in Standard mode by default.
+        settings.scientific = false;
         let mut history: History = cc
             .storage
             .and_then(|s| eframe::get_value(s, "history"))
